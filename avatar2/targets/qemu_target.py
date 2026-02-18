@@ -96,12 +96,7 @@ class QemuTarget(Target):
                 "Executable for %s not found: %s" % (self.name, self.executable)
             )
 
-        if self.machine is None or self.machine == 'configurable':
-            machine = ["-machine", "configurable"]
-            avatar_config = ["-avatar-config", self.qemu_config_file]
-        else:
-            machine = ["-machine", self.machine]
-            avatar_config = []  # Going to use QEMU's config to create machine
+        machine = ["-machine", f"configurable,config-filename={self.qemu_config_file}"]
         gdb_option = ["-gdb", "tcp::" + str(self.gdb_port)]
 
         if self.gdb_unix_socket_path:
@@ -119,7 +114,6 @@ class QemuTarget(Target):
         cmd_line = (
             executable_name
             + machine
-            + avatar_config
             + gdb_option
             + stop_on_startup
             + self.additional_args
