@@ -4,7 +4,7 @@
 #
 source /etc/os-release
 
-TARGET_LIST="arm-softmmu,mips-softmmu"
+TARGET_LIST="arm-softmmu,mips-softmmu,aarch64-softmmu,ppc-softmmu,ppc64-softmmu"
 REPO="deb-src http://archive.ubuntu.com/ubuntu/ $UBUNTU_CODENAME-security main restricted"
 APT_SRC="/etc/apt/sources.list"
 QEMU_NPROC=${QEMU_NPROC:-$(nproc)}
@@ -54,23 +54,11 @@ git submodule update --init avatar-qemu
 
 cd avatar-qemu
 git submodule update --init dtc
-# git checkout master
 
-<<<<<<< HEAD
 mkdir -p ../../build/qemu/
 cd ../../build/qemu
-../../src/avatar-qemu/configure --disable-sdl \
-   --target-list=arm-softmmu,aarch64-softmmu,ppc-softmmu
-=======
-mkdir -p build
-cd build
-../configure \
+../../src/avatar-qemu/configure \
     --disable-sdl \
     --target-list=$TARGET_LIST
->>>>>>> upstream/main
 
-make -j $QEMU_NPROC
-
-echo ""
-echo "Export the following env variable:"
-echo "export AVATAR2_PANDA_EXECUTABLE=$PWD/arm-softmmu/qemu-system-arm"
+ninja
