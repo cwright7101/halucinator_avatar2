@@ -16,24 +16,32 @@ class PPCBase(Architecture):
     get_gdb_executable = Architecture.resolve(GDB_MULTI)
     get_oocd_executable = Architecture.resolve(OPENOCD)
 
-    # common registers r0-r31 + special regs
+    # common registers r0-r31 + FPR0-FPR31 + special regs
     registers = {f"r{i}": i for i in range(32)}
+    registers.update({f"fpr{i}": 32 + i for i in range(32)})
     registers.update({
-        "sp": 1, "pc": 64, "msr": 65, "cr": 66,
-        "lr": 67, "ctr": 68, "xer": 69
+        "sp": 1, "toc": 2,
+        "nip": 64, "pc": 64, "msr": 65, "cr": 66,
+        "lr": 67, "ctr": 68, "xer": 69, "fpscr": 70
     })
 
     # common unicorn mapping
     unicorn_registers = {f"r{i}": getattr(upc, f"UC_PPC_REG_{i}")
                         for i in range(32)}
+    unicorn_registers.update({f"fpr{i}": getattr(upc, f"UC_PPC_REG_FPR{i}")
+                             for i in range(32)})
     unicorn_registers.update({
-        "pc": upc.UC_PPC_REG_PC, "nip": upc.UC_PPC_REG_PC,
+        "pc": upc.UC_PPC_REG_PC, "PC": upc.UC_PPC_REG_PC,
+        "nip": upc.UC_PPC_REG_PC,
         "cr0": upc.UC_PPC_REG_CR0, "cr1": upc.UC_PPC_REG_CR1,
         "cr2": upc.UC_PPC_REG_CR2, "cr3": upc.UC_PPC_REG_CR3,
         "cr4": upc.UC_PPC_REG_CR4, "cr5": upc.UC_PPC_REG_CR5,
         "cr6": upc.UC_PPC_REG_CR6, "cr7": upc.UC_PPC_REG_CR7,
-        "lr": upc.UC_PPC_REG_LR, "xer": upc.UC_PPC_REG_XER,
-        "ctr": upc.UC_PPC_REG_CTR, "msr": upc.UC_PPC_REG_MSR
+        "lr": upc.UC_PPC_REG_LR, "LR": upc.UC_PPC_REG_LR,
+        "xer": upc.UC_PPC_REG_XER,
+        "ctr": upc.UC_PPC_REG_CTR, "msr": upc.UC_PPC_REG_MSR,
+        "fpscr": upc.UC_PPC_REG_FPSCR,
+        "cr": upc.UC_PPC_REG_CR
     })
 
     pc_name = "pc"
