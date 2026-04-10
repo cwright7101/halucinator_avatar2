@@ -96,7 +96,20 @@ class QemuTarget(Target):
                 "Executable for %s not found: %s" % (self.name, self.executable)
             )
 
-        machine = ["-machine", f"configurable,config-filename={self.qemu_config_file}"]
+        # The 'configurable' machine is avatar-qemu's custom machine type that
+        # creates memory regions, CPU, and peripherals from a JSON config file
+        # passed via the config-filename property (registered in machine.c).
+        # This is the standard mode for halucinator/avatar2 where the framework
+        # controls the full hardware layout.
+        #
+        # Non-configurable machines (e.g. 'virt', 'mps2-an385') use QEMU's
+        # built-in machine definitions with their own fixed hardware layout.
+        # The avatar2 config file is not used in this case — memory regions
+        # and peripherals are defined by QEMU's machine model instead.
+        if self.machine is None or self.machine == 'configurable':
+            machine = ["-machine", f"configurable,config-filename={self.qemu_config_file}"]
+        else:
+            machine = ["-machine", self.machine]
         gdb_option = ["-gdb", "tcp::" + str(self.gdb_port)]
 
         if self.gdb_unix_socket_path:
