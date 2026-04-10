@@ -56,7 +56,7 @@ class PPC32(PPCBase):
 class PPC64(PPCBase):
     """64-bit PowerPC."""
     qemu_name = "ppc64"
-    gdb_name = "powerpc64:common"
+    gdb_name = "powerpc:common64"
     endian = "big"
     capstone_mode = CS_MODE_BIG_ENDIAN | CS_MODE_64
     keystone_mode = KS_MODE_PPC64
