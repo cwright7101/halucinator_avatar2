@@ -10,6 +10,9 @@ from avatar2.installer.config import QEMU, PANDA, OPENOCD, GDB_MULTI
 
 class MIPS32(Architecture):
 
+    qemu_name = 'mips'
+    gdb_name = 'mips'
+
     get_qemu_executable = Architecture.resolve(QEMU)
     get_panda_executable = Architecture.resolve(PANDA)
     get_gdb_executable  = Architecture.resolve(GDB_MULTI)
