@@ -82,6 +82,7 @@ class GDBRSPServer(Thread):
             'Z' : self.insert_breakpoint,
             'z' : self.remove_breakpoint,
             'D' : self.detach,
+            'k' : self.kill,
         }
 
     def shutdown(self):
@@ -447,6 +448,31 @@ class GDBRSPServer(Thread):
             self.send_packet(b'OK')
             self.conn.close()
 
+        return None
+
+    def kill(self, pkt):
+        """
+        Handle GDB's 'k' (kill) packet. cppdbg sends this when the user
+        clicks Stop or Restart. Per RSP spec, 'k' has no reply — the
+        server just terminates and tears down. We mirror the detach
+        cleanup path (remove breakpoints, close the socket) and return
+        None so the dispatcher doesn't try to send a response. The
+        RSP server thread then exits its recv loop when conn is closed.
+        """
+        l.info("GDB client sent 'k' (kill); closing RSP connection")
+        if not self.target.state & TargetStates.EXITED:
+            for bpno in list(self.bps.keys()):
+                try:
+                    self.target.remove_breakpoint(bpno)
+                except Exception as e:
+                    l.debug("remove_breakpoint(%s) during kill failed: %s", bpno, e)
+            self.bps.clear()
+        self.running = False
+        if self.conn._closed is False:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
         return None
 
     ### Sending and receiving
