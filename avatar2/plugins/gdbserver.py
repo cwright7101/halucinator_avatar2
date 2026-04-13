@@ -1,4 +1,4 @@
-#/usr/bin/env 
+#/usr/bin/env python
 
 import logging
 import re
@@ -47,30 +47,31 @@ class GDBRSPServer(Thread):
         self.running = False
         self.bps = {}
         self._do_shutdown = Event()
-        
 
-        xml_regs = ET.parse(self.xml_file).getroot().find('feature')
-        self.registers = [reg.attrib for reg in xml_regs if reg.tag == 'reg']
-        assert(len(self.registers))
+        # Optional callback: stop_filter(target, pc) -> bool
+        # If set and returns True, the stop is suppressed (not reported to
+        # the GDB client). This allows external frameworks to silently handle
+        # certain breakpoints (e.g. intercepts) without the client seeing them.
+        self.stop_filter = None
 
-        l.debug("Registers %s"% self.registers)
+        # Register list populated lazily from target XML on first connection
+        self.registers = []
 
-        self.registers = []  # Will populate when connection made and xml is
-                               # read from target
         self.handlers = {
-            'q' : self.forward_pkt,
-            'v' : self.forward_pkt,
+            'q' : self.query,
+            'v' : self.multi_letter_cmd,
             'H' : self.set_thread_op,
-            '?' : self.forward_pkt,
-            'g' : self.forward_pkt,
-            'G' : self.forward_pkt,
+            '?' : self.halt_reason,
+            'g' : self.read_registers,
+            'G' : self.reg_write,
+            'p' : self.read_single_reg,
+            'P' : self.write_single_reg,
             'm' : self.mem_read,
             'M' : self.mem_write,
             'c' : self.cont,
-            'C' : self.cont, #cond with signal, we don't care
+            'C' : self.cont,
             's' : self.step,
             'S' : self.step,
-            'S' : self.step_signal,
             'Z' : self.insert_breakpoint,
             'z' : self.remove_breakpoint,
             'D' : self.detach,
@@ -150,48 +151,69 @@ class GDBRSPServer(Thread):
             filename = request[3]
             start_idx, rd_size = request[4].split(b",")
             start_idx = int(start_idx, 16)
-            rd_size= int(rd_size, 16)
-            #If target has a connection to GDB use it and forward the
-            #request. Maybe able to replace most the code here with this approach
-            if hasattr(self.target.protocols,'execution') and \
-                issubclass(type(self.target.protocols.execution), GDBProtocol):
-                l.debug("Forwarding request for %s", pkt[1:])
-                gdb = self.target.protocols.execution
-                success, resp = gdb.console_command(f"maintenance packet {pkt.decode()}")
-                if success:
-                    data = resp.split('received: \\"')[1][:-4]
-                    # Data has been escaped twice by time we get it.
-                    data = data.encode('utf-8').decode('unicode_escape')
-                    data = data.encode('utf-8').decode('unicode_escape')
-                    
-                    ret_data = data.encode()
-                    l.debug("Ret_data %s"% ret_data)
-                    
-                    payload = ret_data[1:]
-                    self.xml_files[filename].append(payload)
-                    if len(payload) < rd_size:
-                        # This is last read of xml will want to parse it
-                        xml_data = b''.join(self.xml_files[filename])
+            rd_size = int(rd_size, 16)
 
-                        l.debug("Writing to %s: %s"%(filename, xml_data))
-                        with open(filename, 'wb') as outfile:
-                            outfile.write(xml_data)
-                        try:
-                            xml_regs = ET.fromstring(xml_data).find('feature')
-                            if xml_regs:
-                                regs = [reg.attrib for reg in xml_regs if reg.tag == 'reg']
-                                l.debug("Adding registers %s" % regs)
-                                self.registers.extend(regs)
-                        except ET.ParseError as e :
-                            l.debug("Parsing Error: %s"% e)
-                            pass
-                    return ret_data
-                return None
-                
+            # Try forwarding to the underlying GDB protocol connection
+            # (if present). If anything goes wrong — parse error, protocol
+            # not connected, empty console response — fall back to the
+            # static xml_file. The previous implementation returned None
+            # on forwarding failure, which sent no response on the wire
+            # and made GDB hang on qSupported → qXfer:features:read
+            # with "Bogus trace status reply from target: timeout".
+            forwarded = None
+            if hasattr(self.target.protocols, 'execution') and \
+                    issubclass(type(self.target.protocols.execution), GDBProtocol):
+                try:
+                    l.debug("Forwarding request for %s", pkt[1:])
+                    gdb = self.target.protocols.execution
+                    success, resp = gdb.console_command(
+                        f"maintenance packet {pkt.decode()}"
+                    )
+                    if success:
+                        data = resp.split('received: \\"')[1][:-4]
+                        # Data has been escaped twice by time we get it.
+                        data = data.encode('utf-8').decode('unicode_escape')
+                        data = data.encode('utf-8').decode('unicode_escape')
 
-            off, length = match_hex('qXfer:features:read:target.xml:(.*),(.*)',
-                                   pkt.decode())
-            
+                        ret_data = data.encode()
+                        l.debug("Ret_data %s" % ret_data)
+
+                        payload = ret_data[1:]
+                        self.xml_files[filename].append(payload)
+                        if len(payload) < rd_size:
+                            # This is last read of xml will want to parse it
+                            xml_data = b''.join(self.xml_files[filename])
+
+                            l.debug("Writing to %s: %s" % (filename, xml_data))
+                            with open(filename, 'wb') as outfile:
+                                outfile.write(xml_data)
+                            try:
+                                xml_regs = ET.fromstring(xml_data).find('feature')
+                                if xml_regs:
+                                    regs = [reg.attrib for reg in xml_regs
+                                            if reg.tag == 'reg']
+                                    l.debug("Adding registers %s" % regs)
+                                    self.registers.extend(regs)
+                            except ET.ParseError as e:
+                                l.debug("Parsing Error: %s" % e)
+                                pass
+                        forwarded = ret_data
+                except Exception as e:
+                    l.warning(
+                        "Forwarding qXfer:features:read failed (%s); "
+                        "falling back to static xml_file", e
+                    )
+
+            if forwarded is not None:
+                return forwarded
+
+            # Fallback: serve the static xml_file that ships with avatar2.
+            # This path is what test suites exercise and is reliable even
+            # when there's no GDB protocol attached to the target.
+            off, length = match_hex(
+                'qXfer:features:read:target.xml:(.*),(.*)',
+                pkt.decode(),
+            )
             with open(self.xml_file, 'rb') as f:
                 data = f.read()
             resp_data = data[off:off+length]
@@ -199,7 +221,18 @@ class GDBRSPServer(Thread):
                 prefix = b'l'
             else:
                 prefix = b'm'
-            return prefix+resp_data
+            # Also populate self.registers from the static XML on the
+            # first read so `g`/`p` have the register list they need.
+            if not self.registers:
+                try:
+                    xml_regs = ET.fromstring(data).find('feature')
+                    if xml_regs:
+                        self.registers.extend(
+                            reg.attrib for reg in xml_regs if reg.tag == 'reg'
+                        )
+                except ET.ParseError:
+                    pass
+            return prefix + resp_data
 
         if pkt[1:].startswith(b'fThreadInfo') is True:
             return b'm1'
@@ -243,7 +276,9 @@ class GDBRSPServer(Thread):
         return b'OK' # we don't implement threads yet
 
     def halt_reason(self, pkt):
-        return b'S00' # we don't specify the signal yet
+        if self.target.state & TargetStates.STOPPED:
+            return b'T05'  # SIGTRAP
+        return b'S00'
 
     def read_registers(self, pkt):
         resp = ''
@@ -312,18 +347,49 @@ class GDBRSPServer(Thread):
             return b'E00'
 
 
+    def read_single_reg(self, pkt):
+        try:
+            reg_num = int(pkt[1:].decode(), 16)
+            if reg_num < len(self.registers):
+                reg = self.registers[reg_num]
+                bitsize = int(reg['bitsize'])
+                r_len = bitsize // 8
+                r_val = self.target.read_register(reg['name'])
+                if r_val is not None:
+                    return r_val.to_bytes(r_len, 'little').hex().encode()
+            return b'E00'
+        except Exception as e:
+            l.warning(f'Error in read_single_reg: {e}')
+            return b'E00'
+
+    def write_single_reg(self, pkt):
+        try:
+            eq_pos = pkt.index(ord(b'='))
+            reg_num = int(pkt[1:eq_pos].decode(), 16)
+            if reg_num < len(self.registers):
+                reg = self.registers[reg_num]
+                bitsize = int(reg['bitsize'])
+                r_len = bitsize // 8
+                hex_val = pkt[eq_pos+1:]
+                r_raw = bytes.fromhex(hex_val.decode())
+                int_val = int.from_bytes(r_raw, byteorder='little')
+                self.target.write_register(reg['name'], int_val)
+                return b'OK'
+            return b'E00'
+        except Exception as e:
+            l.warning(f'Error in write_single_reg: {e}')
+            return b'E00'
+
     def cont(self, pkt):
         self.target.cont()
         self.running = True
-        return b'OK'
+        return None  # No response until target stops (GDB RSP run/stop model)
 
     def step(self, pkt):
         self.target.step()
-        return b'S00'
-
-    def step_signal(self, pkt):
-        self.target.step()
-        return pkt[1:]
+        while not (self.target.state & TargetStates.STOPPED):
+            sleep(0.0001)
+        return b'T05'
 
     def insert_breakpoint(self, pkt):
         addr, kind = match_hex('Z0,(.*),(.*)', pkt.decode())
@@ -349,13 +415,15 @@ class GDBRSPServer(Thread):
     def detach(self, pkt):
         l.info("Exiting GDB server")
         if not self.target.state & TargetStates.EXITED:
-            for bpno in self.bps.items():
+            for bpno in list(self.bps.keys()):
                 self.target.remove_breakpoint(bpno)
+            self.bps.clear()
             self.target.cont()
+        self.running = False
         if self.conn._closed is False:
             self.send_packet(b'OK')
             self.conn.close()
-        
+
         return None
 
     ### Sending and receiving
@@ -374,9 +442,11 @@ class GDBRSPServer(Thread):
 
     def check_breakpoint_hit(self):
         if self.target.state & TargetStates.STOPPED and self.running is True:
-            if self.target.regs.pc in self.bps.values():
-                self.running = False
-                self.send_packet(b'S05')
+            pc = self.target.regs.pc & 0xFFFFFFFE
+            if self.stop_filter and self.stop_filter(self.target, pc):
+                return  # Suppressed — an external handler is dealing with it
+            self.running = False
+            self.send_packet(b'T05')
 
 
     def receive_packet(self):
@@ -416,12 +486,15 @@ class GDBRSPServer(Thread):
                 pkt += c
 
 
-def spawn_gdb_server(self, target, port, do_forwarding=True, xml_file=None):
+def spawn_gdb_server(self, target, port, do_forwarding=True, xml_file=None,
+                     stop_filter=None):
     if xml_file is None:
         # default for now: use ARM
         xml_file = f'{dirname(__file__)}/gdb/arm-target.xml'
-      
+
     server = GDBRSPServer(self, target, port, xml_file, do_forwarding)
+    if stop_filter is not None:
+        server.stop_filter = stop_filter
     server.start()
     self._gdb_servers.append(server)
     return server
