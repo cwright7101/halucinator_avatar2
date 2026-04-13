@@ -150,14 +150,30 @@ class GDBRSPServer(Thread):
         available (no GDBProtocol) or errors out. Used for data packets
         (g/G/p/P/m/M) where a single forwarded round-trip is vastly
         faster than the per-register or per-chunk Python loop.
+
+        Emits per-packet timing at DEBUG so perf regressions can be
+        tracked — enable with e.g.
+            logging.getLogger('avatar2.gdbplugin').setLevel(logging.DEBUG)
         """
+        import time as _t
+        t0 = _t.perf_counter()
         try:
             forwarded = self.forward_pkt(pkt)
             if forwarded is not None:
+                l.debug(
+                    "fwd %s = %dB in %.1fms",
+                    pkt[:1], len(forwarded), (_t.perf_counter() - t0) * 1000,
+                )
                 return forwarded
         except Exception as e:
             l.debug("forward_pkt failed for %s: %s", pkt[:1], e)
-        return fallback_handler(pkt)
+        t1 = _t.perf_counter()
+        resp = fallback_handler(pkt)
+        l.debug(
+            "fallback %s in %.1fms (forward_pkt %.1fms)",
+            pkt[:1], (_t.perf_counter() - t1) * 1000, (t1 - t0) * 1000,
+        )
+        return resp
 
     def query(self, pkt):
         if pkt[1:].startswith(b'Supported') is True:
