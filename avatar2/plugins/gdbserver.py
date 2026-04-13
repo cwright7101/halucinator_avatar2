@@ -57,17 +57,24 @@ class GDBRSPServer(Thread):
         # Register list populated lazily from target XML on first connection
         self.registers = []
 
+        # Handler dispatch. Data packets (g/G/p/P/m/M) get forwarded
+        # directly to QEMU's internal GDB stub via forward_or_fallback.
+        # That avoids doing N per-register round trips on every single-
+        # step, which is what made the GDB-backed debug UI feel sluggish
+        # compared to the custom DAP variant. The explicit per-register
+        # handlers remain as fallbacks when no GDBProtocol is attached
+        # to the target.
         self.handlers = {
             'q' : self.query,
             'v' : self.multi_letter_cmd,
             'H' : self.set_thread_op,
             '?' : self.halt_reason,
-            'g' : self.read_registers,
-            'G' : self.reg_write,
-            'p' : self.read_single_reg,
-            'P' : self.write_single_reg,
-            'm' : self.mem_read,
-            'M' : self.mem_write,
+            'g' : lambda pkt: self._forward_or_fallback(pkt, self.read_registers),
+            'G' : lambda pkt: self._forward_or_fallback(pkt, self.reg_write),
+            'p' : lambda pkt: self._forward_or_fallback(pkt, self.read_single_reg),
+            'P' : lambda pkt: self._forward_or_fallback(pkt, self.write_single_reg),
+            'm' : lambda pkt: self._forward_or_fallback(pkt, self.mem_read),
+            'M' : lambda pkt: self._forward_or_fallback(pkt, self.mem_write),
             'c' : self.cont,
             'C' : self.cont,
             's' : self.step,
@@ -134,6 +141,22 @@ class GDBRSPServer(Thread):
                 data = data.encode('utf-8').decode('unicode_escape')
                 data = data.encode('utf-8').decode('unicode_escape')
                 return data.encode()
+
+    def _forward_or_fallback(self, pkt, fallback_handler):
+        """
+        Try forwarding the packet to QEMU's internal GDB stub for speed;
+        fall back to a Python-implemented handler if forwarding isn't
+        available (no GDBProtocol) or errors out. Used for data packets
+        (g/G/p/P/m/M) where a single forwarded round-trip is vastly
+        faster than the per-register or per-chunk Python loop.
+        """
+        try:
+            forwarded = self.forward_pkt(pkt)
+            if forwarded is not None:
+                return forwarded
+        except Exception as e:
+            l.debug("forward_pkt failed for %s: %s", pkt[:1], e)
+        return fallback_handler(pkt)
 
     def query(self, pkt):
         if pkt[1:].startswith(b'Supported') is True:
