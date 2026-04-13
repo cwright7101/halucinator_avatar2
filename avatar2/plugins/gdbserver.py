@@ -442,7 +442,20 @@ class GDBRSPServer(Thread):
 
     def check_breakpoint_hit(self):
         if self.target.state & TargetStates.STOPPED and self.running is True:
-            pc = self.target.regs.pc & 0xFFFFFFFE
+            # regs.pc can transiently return None when the target is
+            # mid-transition (e.g. a HAL intercept just triggered and
+            # avatar2 hasn't refreshed). Treat that as "no stable pc yet"
+            # and try again on the next recv timeout instead of crashing
+            # the whole RSP server thread.
+            try:
+                pc = self.target.regs.pc
+            except Exception as e:
+                l.debug("check_breakpoint_hit: regs.pc read failed: %s", e)
+                return
+            if pc is None:
+                l.debug("check_breakpoint_hit: regs.pc returned None")
+                return
+            pc &= 0xFFFFFFFE
             if self.stop_filter and self.stop_filter(self.target, pc):
                 return  # Suppressed — an external handler is dealing with it
             self.running = False
