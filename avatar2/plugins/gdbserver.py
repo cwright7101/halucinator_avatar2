@@ -539,7 +539,13 @@ class GDBRSPServer(Thread):
                     self.conn.close()
                     return
 
-                if self.target.state & TargetStates.EXITED:
+                # Only report exit while the client thinks the target is
+                # running (i.e., after a 'c' or 's'). Without this guard,
+                # a new GDB client connecting after the firmware has
+                # finished gets an unsolicited S03 injected into its
+                # handshake — corrupting the packet stream with "Remote
+                # replied unexpectedly to 'vMustReplyEmpty'" errors.
+                if self.running and self.target.state & TargetStates.EXITED:
                     self.send_packet(b'S03')
                     self.conn.close()
                     return
